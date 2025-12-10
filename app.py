@@ -1,4 +1,4 @@
-# app.py  (PostgreSQL version)
+# app.py  (PostgreSQL version, auto-create table)
 from __future__ import annotations
 import os
 import mimetypes
@@ -23,7 +23,7 @@ PORT = int(os.getenv("PORT", 5000))
 DEBUG = os.getenv("DEBUG", "false").strip().lower() in ("1", "true", "yes")
 
 # ---------- PostgreSQL connection info ----------
-DB_HOST = os.getenv("DB_HOST")          # e.g. dpg-d4skbvumcj7s73c29e00-a
+DB_HOST = os.getenv("DB_HOST")          # e.g. dpg-d4skbvumcj7s73c29e00-a (internal)
 DB_PORT = int(os.getenv("DB_PORT", 5432))
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS", "")
@@ -124,6 +124,7 @@ def find_pdf_by_key(key: Optional[str] = None) -> Optional[pathlib.Path]:
 def get_db_connection():
     """
     Returns a PostgreSQL connection or None if not available.
+    Uses Render's internal hostname (DB_HOST).
     """
     if not DB_HOST or not DB_USER or not DB_NAME:
         logging.warning("DB not configured properly (DB_HOST/DB_USER/DB_NAME missing)")
@@ -211,10 +212,9 @@ def save_submission_pg(name: str, email: str, mobile: str, pdf_name: Optional[st
         return False
 
 
-# ---------- Hooks ----------
-@app.before_first_request
-def init_db():
-    ensure_submissions_table()
+# ---------- Call table creation at import ----------
+# This runs once when app.py is imported by gunicorn
+ensure_submissions_table()
 
 
 # ---------- Routes ----------
@@ -296,4 +296,3 @@ def download():
 if __name__ == "__main__":
     logging.info("Starting app on %s:%s  DEBUG=%s", HOST, PORT, DEBUG)
     app.run(host=HOST, port=PORT, debug=DEBUG)
-
