@@ -1,4 +1,4 @@
-# app.py  (PostgreSQL version, auto-create table)
+# app.py  (PostgreSQL version, auto-create table + html view)
 from __future__ import annotations
 import os
 import mimetypes
@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, render_template_string
 from dotenv import load_dotenv
 
 # PostgreSQL driver
@@ -88,8 +88,10 @@ def find_pdf_by_key(key: Optional[str] = None) -> Optional[pathlib.Path]:
         return None
 
     wanted = (key or "").strip().lower()
-    pdf_files = [p for p in ASSETS_DIR.iterdir()
-                 if p.is_file() and p.suffix.lower() in ALLOWED_PDF_EXTS]
+    pdf_files = [
+        p for p in ASSETS_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in ALLOWED_PDF_EXTS
+    ]
 
     if not pdf_files:
         logging.warning("No PDF files found in assets directory.")
@@ -241,6 +243,83 @@ def db_check():
     except Exception as e:
         logging.exception("DB check failed")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/submissions-view", methods=["GET"])
+def submissions_view():
+    """
+    Simple HTML view of all submissions (like a basic phpMyAdmin table).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return "<h1>DB Error</h1><p>No DB connection.</p>", 500
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, timestamp_utc, name, email, mobile, pdf_requested
+                FROM submissions
+                ORDER BY id DESC
+                """
+            )
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logging.exception("Failed to fetch submissions: %s", e)
+        return f"<h1>DB Error</h1><pre>{e}</pre>", 500
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Submissions</title>
+      <style>
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; padding: 20px; }
+        h1 { margin-bottom: 16px; }
+        table { border-collapse: collapse; width: 100%; max-width: 100%; }
+        th, td { border: 1px solid #e5e7eb; padding: 8px 10px; font-size: 14px; }
+        th { background: #f3f4f6; text-align: left; }
+        tr:nth-child(even) { background: #f9fafb; }
+        .badge { display: inline-block; padding: 2px 6px; border-radius: 999px; font-size: 12px; background:#e5f3ff; }
+      </style>
+    </head>
+    <body>
+      <h1>Submissions ({{ count }})</h1>
+      {% if rows %}
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Timestamp (UTC)</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Mobile</th>
+            <th>PDF Requested</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td>{{ r[0] }}</td>
+            <td>{{ r[1] }}</td>
+            <td>{{ r[2] }}</td>
+            <td>{{ r[3] }}</td>
+            <td>{{ r[4] }}</td>
+            <td><span class="badge">{{ r[5] }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p>No submissions found.</p>
+      {% endif %}
+    </body>
+    </html>
+    """
+
+    return render_template_string(html, rows=rows, count=len(rows))
 
 
 @app.route("/download", methods=["POST"])
