@@ -1,4 +1,4 @@
-# app.py  (replace your existing file with this)
+# app.py  (PostgreSQL version)
 from __future__ import annotations
 import os
 import mimetypes
@@ -10,9 +10,9 @@ from typing import Optional
 from flask import Flask, request, jsonify, send_file
 from dotenv import load_dotenv
 
-# MySQL connector
-import mysql.connector
-from mysql.connector import Error as MySQLError
+# PostgreSQL driver
+import psycopg2
+from psycopg2 import OperationalError
 
 # Load .env
 load_dotenv()
@@ -22,17 +22,22 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 5000))
 DEBUG = os.getenv("DEBUG", "false").strip().lower() in ("1", "true", "yes")
 
-# ---------- MySQL connection info ----------
-DB_HOST = os.getenv("DB_HOST")           # ❗ NO localhost fallback
-DB_PORT = int(os.getenv("DB_PORT", 3306))
+# ---------- PostgreSQL connection info ----------
+DB_HOST = os.getenv("DB_HOST")          # e.g. dpg-d4skbvumcj7s73c29e00-a
+DB_PORT = int(os.getenv("DB_PORT", 5432))
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS", "")
 DB_NAME = os.getenv("DB_NAME")
 
-# Safety check at startup
-if not all([DB_HOST, DB_USER, DB_NAME]):
-    raise RuntimeError("Missing required DB environment variables")
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 
+logging.info(
+    "DB config: host=%r port=%r user=%r db=%r",
+    DB_HOST, DB_PORT, DB_USER, DB_NAME
+)
 
 # Where PDFs are stored
 BASE_DIR = pathlib.Path(__file__).resolve().parent
@@ -50,9 +55,6 @@ PDF_KEY_MAP = {
 
 ALLOWED_PDF_EXTS = {".pdf", ".PDF"}
 MAX_FIELD_LEN = 300
-
-logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__, static_folder=".", static_url_path="/")
 
@@ -75,17 +77,25 @@ def validate_submission(name: str, email: str, mobile: str) -> Optional[str]:
 
 
 def find_pdf_by_key(key: Optional[str] = None) -> Optional[pathlib.Path]:
+    """
+    Find a PDF file in assets/ using:
+    - exact key mapping (PDF_KEY_MAP)
+    - substring search
+    - fallback keywords
+    """
     if not ASSETS_DIR.exists():
         logging.error("Assets directory %s does not exist", ASSETS_DIR)
         return None
 
     wanted = (key or "").strip().lower()
-    pdf_files = [p for p in ASSETS_DIR.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_PDF_EXTS]
+    pdf_files = [p for p in ASSETS_DIR.iterdir()
+                 if p.is_file() and p.suffix.lower() in ALLOWED_PDF_EXTS]
+
     if not pdf_files:
         logging.warning("No PDF files found in assets directory.")
         return None
 
-    # mapping
+    # 1) direct mapping
     if wanted:
         mapped = PDF_KEY_MAP.get(wanted)
         if mapped:
@@ -93,58 +103,77 @@ def find_pdf_by_key(key: Optional[str] = None) -> Optional[pathlib.Path]:
             if candidate.exists():
                 return candidate
 
-    # substring match
+    # 2) substring match
     if wanted:
         for p in pdf_files:
             if wanted in p.name.lower():
                 return p
 
-    # fallback terms
+    # 3) generic fallback terms
     fallback_terms = ["air", "cutter", "compactor", "force", "feeder", "dry", "wash", "size", "pallet"]
     for term in fallback_terms:
         for p in pdf_files:
             if term in p.name.lower():
                 return p
 
+    # 4) any PDF as last resort
     return pdf_files[0]
 
 
+# ---------- DB helpers ----------
 def get_db_connection():
-    """Return a new DB connection (caller should close)."""
+    """
+    Returns a PostgreSQL connection or None if not available.
+    """
+    if not DB_HOST or not DB_USER or not DB_NAME:
+        logging.warning("DB not configured properly (DB_HOST/DB_USER/DB_NAME missing)")
+        return None
+
     try:
-        conn = mysql.connector.connect(
+        conn = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
             user=DB_USER,
             password=DB_PASS,
-            database=DB_NAME,
-            autocommit=True,
-            connect_timeout=10
+            dbname=DB_NAME,
+            connect_timeout=10,
         )
+        conn.autocommit = True
         return conn
-    except MySQLError:
-        logging.exception("Failed to connect to MySQL")
+    except OperationalError as e:
+        logging.error("Failed to connect to PostgreSQL: %s", e)
         return None
 
 
-def save_submission_mysql(name: str, email: str, mobile: str, pdf_name: Optional[str]) -> bool:
-    """Insert submission into `submissions` table. Returns True on success."""
+def ensure_submissions_table():
+    """
+    Create the submissions table if it does not exist.
+    Safe to call multiple times.
+    """
     conn = get_db_connection()
     if not conn:
-        logging.error("No DB connection available")
+        logging.error("Cannot ensure table; no DB connection.")
         return False
+
     try:
-        cur = conn.cursor()
-        sql = """
-            INSERT INTO submissions (timestamp_utc, name, email, mobile, pdf_requested)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cur.execute(sql, (datetime.utcnow().isoformat(), name, email, mobile, pdf_name or ""))
-        cur.close()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS submissions (
+                    id SERIAL PRIMARY KEY,
+                    timestamp_utc TIMESTAMPTZ NOT NULL,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    mobile TEXT NOT NULL,
+                    pdf_requested TEXT NOT NULL
+                );
+                """
+            )
         conn.close()
+        logging.info("Ensured submissions table exists.")
         return True
-    except MySQLError:
-        logging.exception("Failed to insert submission into DB")
+    except Exception as e:
+        logging.exception("Failed to ensure submissions table: %s", e)
         try:
             conn.close()
         except Exception:
@@ -152,10 +181,66 @@ def save_submission_mysql(name: str, email: str, mobile: str, pdf_name: Optional
         return False
 
 
+def save_submission_pg(name: str, email: str, mobile: str, pdf_name: Optional[str]) -> bool:
+    """
+    Insert submission into `submissions` table. Returns True on success.
+    """
+    conn = get_db_connection()
+    if not conn:
+        logging.error("No DB connection available")
+        return False
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO submissions (timestamp_utc, name, email, mobile, pdf_requested)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (datetime.utcnow(), name, email, mobile, pdf_name or ""),
+            )
+        conn.close()
+        logging.info("Saved submission for %s <%s>", name, email)
+        return True
+    except Exception as e:
+        logging.exception("Failed to insert submission into DB: %s", e)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+
+# ---------- Hooks ----------
+@app.before_first_request
+def init_db():
+    ensure_submissions_table()
+
+
 # ---------- Routes ----------
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()}), 200
+
+
+@app.route("/db-check", methods=["GET"])
+def db_check():
+    """
+    Quick check: can the app reach Postgres and see the submissions table?
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"ok": False, "message": "no DB connection"}), 200
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM submissions")
+            count = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"ok": True, "rows": count}), 200
+    except Exception as e:
+        logging.exception("DB check failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/download", methods=["POST"])
@@ -169,7 +254,10 @@ def download():
     mobile = safe_str(payload.get("mobile"))
     pdf_key = safe_str(payload.get("pdf"))
 
-    logging.info("Download request: name=%s email=%s mobile=%s pdf_key=%s", name, email_addr, mobile, pdf_key or "(empty)")
+    logging.info(
+        "Download request: name=%s email=%s mobile=%s pdf_key=%s",
+        name, email_addr, mobile, pdf_key or "(empty)"
+    )
 
     err = validate_submission(name, email_addr, mobile)
     if err:
@@ -181,9 +269,9 @@ def download():
         logging.error("PDF not found for key=%s", pdf_key)
         return jsonify({"message": "Requested PDF not found on server."}), 404
 
-    # save to MySQL (best-effort)
+    # save to PostgreSQL (best-effort)
     try:
-        ok = save_submission_mysql(name, email_addr, mobile, pdf_path.name)
+        ok = save_submission_pg(name, email_addr, mobile, pdf_path.name)
         if not ok:
             logging.warning("Failed to save submission to DB.")
     except Exception:
@@ -197,7 +285,7 @@ def download():
             path_or_file=str(pdf_path),
             as_attachment=True,
             download_name=pdf_path.name,
-            mimetype=mimetype or "application/pdf"
+            mimetype=mimetype or "application/pdf",
         )
     except Exception:
         logging.exception("Failed to send file")
