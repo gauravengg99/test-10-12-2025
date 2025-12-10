@@ -19,15 +19,20 @@ load_dotenv()
 
 # ---------- Config ----------
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "5000"))
-DEBUG = os.getenv("DEBUG", "false").lower() in ("1", "true", "yes")
+PORT = int(os.getenv("PORT", 5000))
+DEBUG = os.getenv("DEBUG", "false").strip().lower() in ("1", "true", "yes")
 
-# MySQL connection info (set these in .env)
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_USER = os.getenv("DB_USER", "root")
+# ---------- MySQL connection info ----------
+DB_HOST = os.getenv("DB_HOST")           # ❗ NO localhost fallback
+DB_PORT = int(os.getenv("DB_PORT", 3306))
+DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS", "")
-DB_NAME = os.getenv("DB_NAME", "gauravdb")
+DB_NAME = os.getenv("DB_NAME")
+
+# Safety check at startup
+if not all([DB_HOST, DB_USER, DB_NAME]):
+    raise RuntimeError("Missing required DB environment variables")
+
 
 # Where PDFs are stored
 BASE_DIR = pathlib.Path(__file__).resolve().parent
