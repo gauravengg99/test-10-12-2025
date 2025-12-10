@@ -1,4 +1,4 @@
-// js/pdf-submit.js — robust download modal + submit handler with inference
+// js/pdf-submit.js
 (function () {
   'use strict';
 
@@ -55,7 +55,6 @@
       if (ev.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
     });
 
-    // infer key from path like "series-cutter-compactor.html" -> "cutter-compactor"
     function inferKeyFromPath() {
       try {
         const p = location.pathname.split('/').pop() || '';
@@ -75,12 +74,8 @@
       try {
         const fd = new FormData(form);
         const inferred = inferKeyFromPath();
-        // prefer explicit data-pdf, fallback to inferred key
-        const pdfKey = (downloadBtn && downloadBtn.dataset && downloadBtn.dataset.pdf)
-          ? downloadBtn.dataset.pdf
-          : inferred;
+        const pdfKey = (downloadBtn && downloadBtn.dataset && downloadBtn.dataset.pdf) ? downloadBtn.dataset.pdf : inferred;
 
-        // set dataset for future operations so network shows it
         if (pdfKey && !(downloadBtn.dataset && downloadBtn.dataset.pdf)) {
           try { downloadBtn.dataset.pdf = pdfKey; } catch (e) {}
         }
